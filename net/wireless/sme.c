@@ -690,6 +690,8 @@ void __cfg80211_disconnected(struct net_device *dev, const u8 *ie,
 		return;
 
 	if (wdev->current_bss) {
+		/* Remove current_bss to fix 'p2p_connect join' issue found during p2p repeat connect test.*/
+		cfg80211_unlink_bss(wdev->wiphy, &wdev->current_bss->pub);
 		cfg80211_unhold_bss(wdev->current_bss);
 		cfg80211_put_bss(&wdev->current_bss->pub);
 	}

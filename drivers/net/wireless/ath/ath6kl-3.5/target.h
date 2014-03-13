@@ -126,10 +126,6 @@
 #define GPIO_BASE_ADDRESS		0x00014000
 #define MBOX_BASE_ADDRESS		0x00018000
 #define ANALOG_INTF_BASE_ADDRESS	0x0001c000
-#define WLAN_BOOTSTRAP_ADDRESS          0x00014140
-
-#define BOOTSTRAP_IS_HSIC(v)            ((v) & (1 << 10))
-#define BOOTSTRAP_IS_USB(v)             ((v) & (1 << 11))
 
 /* real name of the register is unknown */
 #define ATH6KL_ANALOG_PLL_REGISTER	(ANALOG_INTF_BASE_ADDRESS + 0x284)
@@ -345,19 +341,10 @@ struct host_interest {
 #define HI_OPTION_FW_CRASH_COLD_RESET          0x100000
 
 /*Enable watchdog*/
-#define HI_OPTION_FW_WATCHDOG_ENABLE		0x200000
-
-/* Enable one shot noa */
-#define HI_OPTION_ONE_SHOT_NOA_ENABLE		0x2000000
-
-/* Enable SB specific function */
-#define HI_OPTION_ENABLE_SB_SPECIFIC      0x4000000
+#define HI_OPTION_FW_WATCHDOG_ENABLE          0x200000
 
 /*Enable/Disable Wifi Heart Beat Feature*/
 #define HI_OPTION_ENABLE_WLAN_HB              0x10000000
-
-/* Enable Multichannel Concurrency (MCC) - last bit to sync with mainline */
-#define HI_OPTION_MCC_ENABLE                  0x80000000
 
 /* Fw Mode/SubMode Mask
 |------------------------------------------------------------------------------|

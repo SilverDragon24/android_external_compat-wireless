@@ -18,10 +18,6 @@
 
 #include <net/netlink.h>
 
-#ifdef ATH6KL_SUPPORT_WLAN_HB
-#include "core.h"
-#endif
-
 /*
  * netlink.h remove these macros from kernel 3.5.
  * TODO : Error handle for nla_put_XXX calls.
@@ -58,8 +54,6 @@ static const struct nla_policy ath6kl_tm_policy[ATH6KL_TM_ATTR_MAX + 1] = {
 	[ATH6KL_TM_ATTR_DATA]		= { .type = NLA_BINARY,
 					    .len = ATH6KL_TM_DATA_MAX_LEN },
 };
-
-#ifdef CONFIG_NL80211_TESTMODE
 
 void ath6kl_tm_rx_report_event(struct ath6kl *ar, void *buf, size_t buf_len)
 {
@@ -404,14 +398,6 @@ int ath6kl_tm_cmd(struct wiphy *wiphy, void *data, int len)
 
 		if (hb_params->cmd == NL80211_WLAN_HB_ENABLE) {
 			if (hb_params->enable != 0) {
-
-				if (ath6kl_enable_wow_hb(ar)) {
-					printk(KERN_ERR
-					"%s: enable hb wow fail\n",
-					__func__);
-					return -EINVAL;
-				}
-
 				if (hb_params->enable & WLAN_HB_TCP_ENABLE) {
 					ar->wlan_hb_enable |=
 						WLAN_HB_TCP_ENABLE;
@@ -432,15 +418,6 @@ int ath6kl_tm_cmd(struct wiphy *wiphy, void *data, int len)
 				}
 			} else {
 				ar->wlan_hb_enable = 0;
-
-#ifdef CONFIG_ANDROID
-				if (ath6kl_android_enable_wow_default(ar)) {
-					printk(KERN_ERR
-					"%s: enable android defualt wow fail\n",
-					__func__);
-				}
-#endif
-
 				if (ath6kl_wmi_set_heart_beat_params(ar->wmi,
 					vif->fw_vif_idx, 0)) {
 					printk(KERN_ERR
@@ -790,4 +767,3 @@ int ath6kl_tm_cmd(struct wiphy *wiphy, void *data, int len)
 	}
 }
 
-#endif /* CONFIG_NL80211_TESTMODE */

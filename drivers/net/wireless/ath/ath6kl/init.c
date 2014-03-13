@@ -177,6 +177,9 @@ static const struct ath6kl_hw hw_list[] = {
 
 
 #define ATH6KL_DATA_OFFSET    64
+
+#define AR6003_MAC_ADDRESS_OFFSET     0x16
+
 struct sk_buff *ath6kl_buf_alloc(int size)
 {
 	struct sk_buff *skb;
@@ -678,16 +681,95 @@ void ath6kl_core_cleanup(struct ath6kl *ar)
 	ath6kl_deinit_ieee80211_hw(ar);
 }
 
+static
+void calculate_crc(unsigned char *eeprom_data, size_t eeprom_size)
+{
+    unsigned short  *ptr_crc;
+    unsigned short  *ptr16_eeprom;
+    unsigned short  checksum;
+    unsigned long   i;
+    ptr_crc = (unsigned short *)((unsigned char *)eeprom_data + 0x04);
+    *ptr_crc = 0;
+    checksum = 0;
+    ptr16_eeprom = (unsigned short *)eeprom_data;
+    for (i = 0;i < eeprom_size; i += 2)
+    {
+        checksum = checksum ^ (*ptr16_eeprom);
+        ptr16_eeprom++;
+    }
+    checksum = 0xFFFF ^ checksum;
+    *ptr_crc = checksum;
+}
+#define WLAN_MAC_NV            4678
+extern int read_nv(unsigned int nv_item, void *buf);
+
+static void
+ar6000_softmac_update(struct ath6kl *ar, unsigned char *eeprom_data, size_t eeprom_size)
+{
+    static unsigned char random_mac[6];
+    const char *source = "random generated";
+    unsigned char *ptr_mac;
+    int rpcret = 0;
+    int i = 0;
+    char macbuff[6]={0};
+
+    ptr_mac = (unsigned char *)((unsigned char *)eeprom_data + AR6003_MAC_ADDRESS_OFFSET);
+    ath6kl_warn("MAC from EEPROM %02X:%02X:%02X:%02X:%02X:%02X\n",
+                ptr_mac[0], ptr_mac[1], ptr_mac[2],
+                ptr_mac[3], ptr_mac[4], ptr_mac[5]);
+    if (memcmp(random_mac, "\0\0\0\0\0\0", 6)!=0) {
+        memcpy(ptr_mac, random_mac, 6);
+    } else {
+        ptr_mac[0] = random_mac[0] = 2; /* locally administered */
+        ptr_mac[1] = random_mac[1] = 0x03;
+        ptr_mac[2] = random_mac[2] = 0x7F;
+        ptr_mac[3] = random_mac[3] = random32() & 0xff;
+        ptr_mac[4] = random_mac[4] = random32() & 0xff;
+        ptr_mac[5] = random_mac[5] = random32() & 0xff;
+    }
+    rpcret = read_nv(WLAN_MAC_NV,macbuff);
+
+    //in case reading wlan mac from nv fails. we still keep random mac function.
+    if (!rpcret && memcmp(macbuff,"\0\0\0\0\0\0",sizeof(macbuff))!=0) {
+        source = "nv item";
+        for(i = 0; i<6;i++) {
+            ptr_mac[i] = macbuff[5-i];
+        }
+        //memcpy(ptr_mac,macbuff,6);
+    }
+
+    ath6kl_warn("MAC from %s %02X:%02X:%02X:%02X:%02X:%02X\n",  source,
+                     ptr_mac[0], ptr_mac[1], ptr_mac[2],
+                     ptr_mac[3], ptr_mac[4], ptr_mac[5]);
+
+
+     calculate_crc(eeprom_data, eeprom_size);
+}
+
 /* firmware upload */
 static int ath6kl_get_fw(struct ath6kl *ar, const char *filename,
 			 u8 **fw, size_t *fw_len)
 {
 	const struct firmware *fw_entry;
 	int ret;
-
+	unsigned int board_data_size;
 	ret = request_firmware(&fw_entry, filename, ar->dev);
 	if (ret)
 		return ret;
+       switch (ar->target_type) {
+       case TARGET_TYPE_AR6003:
+               board_data_size = AR6003_BOARD_DATA_SZ;
+               break;
+       case TARGET_TYPE_AR6004:
+               board_data_size = AR6004_BOARD_DATA_SZ;
+               break;
+       default:
+               WARN_ON(1);
+               return -EINVAL;
+               break;
+       }
+        if (filename == ar->hw.fw_board && fw_entry->data)
+               ar6000_softmac_update(ar,(unsigned char *)fw_entry->data, board_data_size);
 
 	*fw_len = fw_entry->size;
 	*fw = kmemdup(fw_entry->data, fw_entry->size, GFP_KERNEL);
@@ -1836,7 +1918,7 @@ int ath6kl_core_init(struct ath6kl *ar)
 	ret = ath6kl_fetch_firmwares(ar);
 	if (ret)
 		goto err_htc_cleanup;
-	ath6kl_mangle_mac_address(ar, locally_administered_bit);
+	//ath6kl_mangle_mac_address(ar, locally_administered_bit);
 
 	/* FIXME: we should free all firmwares in the error cases below */
 

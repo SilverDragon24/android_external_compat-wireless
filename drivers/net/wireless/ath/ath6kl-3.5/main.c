@@ -20,10 +20,6 @@
 #include "cfg80211.h"
 #include "target.h"
 #include "debug.h"
-#ifdef ATHTST_SUPPORT
-#include "ieee80211_ioctl.h"
-#include "ce_athtst.h"
-#endif
 
 int _string_to_mac(char *string, int len, u8 *macaddr)
 {
@@ -90,8 +86,7 @@ struct ath6kl_sta *ath6kl_find_sta_by_aid(struct ath6kl_vif *vif, u8 aid)
 
 static void ath6kl_add_new_sta(struct ath6kl_vif *vif, u8 *mac, u8 aid,
 				u8 *wpaie, u8 ielen, u8 keymgmt, u8 ucipher,
-				u8 auth, u8 apsd_info, bool ht_support,
-				u8 phymode)
+				u8 auth, u8 apsd_info, bool ht_support)
 {
 	struct ath6kl_sta *sta;
 	u8 free_slot;
@@ -111,7 +106,6 @@ static void ath6kl_add_new_sta(struct ath6kl_vif *vif, u8 *mac, u8 aid,
 	sta->ucipher = ucipher;
 	sta->auth = auth;
 	sta->apsd_info = apsd_info;
-	sta->phymode = phymode;
 	sta->vif = vif;
 	init_timer(&sta->psq_age_timer);
 	sta->psq_age_timer.function = ath6kl_ps_queue_age_handler;
@@ -133,38 +127,8 @@ static void ath6kl_add_new_sta(struct ath6kl_vif *vif, u8 *mac, u8 aid,
 static void ath6kl_sta_cleanup(struct ath6kl_vif *vif, u8 i)
 {
 	struct ath6kl_sta *sta = &vif->sta_list[i];
-	struct ath6kl *ar = vif->ar;
-	struct ath6kl_p2p_flowctrl *p2p_flowctrl = ar->p2p_flowctrl_ctx;
-	struct ath6kl_fw_conn_list *fw_conn;
-	struct list_head container;
-	int reclaim = 0;
 
 	del_timer_sync(&sta->psq_age_timer);
-
-	if (p2p_flowctrl &&
-		p2p_flowctrl->sche_type == P2P_FLOWCTRL_SCHE_TYPE_CONNECTION) {
-
-		INIT_LIST_HEAD(&container);
-
-		spin_lock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
-		fw_conn = &p2p_flowctrl->fw_conn_list[0];
-		for (i = 0; i < NUM_CONN; i++, fw_conn++) {
-			if (fw_conn->connId == ATH6KL_P2P_FLOWCTRL_NULL_CONNID)
-				continue;
-
-			if (memcmp(fw_conn->mac_addr,
-					sta->mac,
-					ETH_ALEN) == 0) {
-
-				ath6kl_p2p_flowctrl_conn_collect_by_conn(
-					fw_conn, &container, &reclaim);
-				break;
-			}
-		}
-
-		spin_unlock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
-		ath6kl_tx_complete(ar->htc_target, &container);
-	}
 
 	spin_lock_bh(&sta->lock);
 	sta->vif = NULL;
@@ -694,20 +658,6 @@ void ath6kl_free_cookie(struct ath6kl *ar, struct ath6kl_cookie *cookie)
 	return;
 }
 
-int ath6kl_diag_warm_reset(struct ath6kl *ar)
-{
-	int ret;
-
-	ret = ath6kl_hif_diag_warm_reset(ar);
-
-	if (ret) {
-		ath6kl_err("failed to issue warm reset command\n");
-		return ret;
-	}
-
-	return 0;
-}
-
 /*
  * Read from the hardware through its diagnostic window. No cooperation
  * from the firmware is required for this.
@@ -891,13 +841,7 @@ void ath6kl_reset_device(struct ath6kl *ar, u32 target_type,
 		break;
 	}
 
-	/* If the bootstrap mode is HSIC, do warm reset */
-	if (BOOTSTRAP_IS_HSIC(ar->bootstrap_mode)) {
-		status = ath6kl_diag_warm_reset(ar);
-		ath6kl_info("%s: warm reset\n", __func__);
-	} else {
-		status = ath6kl_diag_write32(ar, address, data);
-	}
+	status = ath6kl_diag_write32(ar, address, data);
 
 	if (status)
 		ath6kl_err("failed to reset target\n");
@@ -1000,8 +944,7 @@ static void ath6kl_install_static_wep_keys(struct ath6kl_vif *vif)
 	}
 }
 
-void ath6kl_connect_ap_mode_bss(struct ath6kl_vif *vif, u16 channel,
-				u8 *beacon, u8 beacon_len)
+void ath6kl_connect_ap_mode_bss(struct ath6kl_vif *vif, u16 channel)
 {
 	struct ath6kl *ar = vif->ar;
 	struct ath6kl_req_key *ik;
@@ -1013,7 +956,6 @@ void ath6kl_connect_ap_mode_bss(struct ath6kl_vif *vif, u16 channel,
 	ath6kl_dbg(ATH6KL_DBG_WLAN_CFG, "AP mode started on %u MHz\n", channel);
 
 	vif->bss_ch = channel;
-	ath6kl_ap_beacon_info(vif, beacon, beacon_len);
 
 	switch (vif->auth_mode) {
 	case NONE_AUTH:
@@ -1054,8 +996,7 @@ void ath6kl_connect_ap_mode_bss(struct ath6kl_vif *vif, u16 channel,
 
 void ath6kl_connect_ap_mode_sta(struct ath6kl_vif *vif, u8 aid, u8 *mac_addr,
 				u8 keymgmt, u8 ucipher, u8 auth,
-				u16 assoc_req_len, u8 *assoc_info,
-				u8 apsd_info, u8 phymode)
+				u8 assoc_req_len, u8 *assoc_info, u8 apsd_info)
 {
 	u8 *ies = NULL, *wpa_ie = NULL, *pos;
 	size_t ies_len = 0;
@@ -1117,7 +1058,7 @@ void ath6kl_connect_ap_mode_sta(struct ath6kl_vif *vif, u8 aid, u8 *mac_addr,
 	ath6kl_add_new_sta(vif, mac_addr, aid, wpa_ie,
 			   wpa_ie ? 2 + wpa_ie[1] : 0,
 			   keymgmt, ucipher, auth, apsd_info,
-			   is_ht_sta, phymode);
+			   is_ht_sta);
 
 	/* send event to application */
 	memset(&sinfo, 0, sizeof(sinfo));
@@ -1193,10 +1134,7 @@ void ath6kl_scan_complete_evt(struct ath6kl_vif *vif, int status)
 
 	if (status != WMI_SCAN_STATUS_SUCCESS)
 		aborted = true;
-#ifdef ACS_SUPPORT
-	/* FIXME : bad, may use call-back instead. */
-	ath6kl_acs_scan_complete_event(vif, aborted);
-#endif
+
 	if (ath6kl_htcoex_scan_complete_event(vif, aborted) ==
 		HTCOEX_PASS_SCAN_DONE)
 		ath6kl_cfg80211_scan_complete_event(vif, aborted);
@@ -1267,11 +1205,6 @@ void ath6kl_connect_event(struct ath6kl_vif *vif, u16 channel, u8 *bssid,
 
 	/* Hook connection event */
 	ath6kl_htcoex_connect_event(vif);
-	ath6kl_p2p_connect_event(vif,
-				beacon_ie_len,
-				assoc_req_len,
-				assoc_resp_len,
-				assoc_info);
 	ath6kl_switch_parameter_based_on_connection(vif, false);
 }
 
@@ -1647,8 +1580,6 @@ void ath6kl_disconnect_event(struct ath6kl_vif *vif, u8 reason, u8 *bssid,
 
 		if (memcmp(vif->ndev->dev_addr, bssid, ETH_ALEN) == 0) {
 			vif->bss_ch = 0;
-			vif->phymode = ATH6KL_PHY_MODE_UNKNOWN;
-			vif->chan_type = ATH6KL_CHAN_TYPE_NONE;
 			memset(vif->wep_key_list, 0, sizeof(vif->wep_key_list));
 			clear_bit(CONNECTED, &vif->flags);
 			netif_carrier_off(vif->ndev);
@@ -1704,7 +1635,6 @@ void ath6kl_disconnect_event(struct ath6kl_vif *vif, u8 reason, u8 *bssid,
 	spin_lock_bh(&vif->if_lock);
 	clear_bit(CONNECTED, &vif->flags);
 	clear_bit(CONNECT_HANDSHAKE_PROTECT, &vif->flags);
-	clear_bit(PS_STICK, &vif->flags);
 	del_timer(&vif->shprotect_timer);
 	netif_carrier_off(vif->ndev);
 	spin_unlock_bh(&vif->if_lock);
@@ -1718,8 +1648,6 @@ void ath6kl_disconnect_event(struct ath6kl_vif *vif, u8 reason, u8 *bssid,
 	netif_stop_queue(vif->ndev);
 	memset(vif->bssid, 0, sizeof(vif->bssid));
 	vif->bss_ch = 0;
-	vif->phymode = ATH6KL_PHY_MODE_UNKNOWN;
-	vif->chan_type = ATH6KL_CHAN_TYPE_NONE;
 
 	ath6kl_tx_data_cleanup_by_if(vif);
 
@@ -1772,13 +1700,13 @@ static int ath6kl_close(struct net_device *dev)
 
 	switch (vif->sme_state) {
 	case SME_CONNECTING:
-		ath6kl_cfg80211_connect_result(vif, vif->bssid, NULL, 0,
+		cfg80211_connect_result(vif->ndev, vif->bssid, NULL, 0,
 					NULL, 0,
 					WLAN_STATUS_UNSPECIFIED_FAILURE,
 					GFP_KERNEL);
 		break;
 	case SME_CONNECTED:
-		ath6kl_cfg80211_disconnected(vif, 0, NULL, 0, GFP_KERNEL);
+		cfg80211_disconnected(vif->ndev, 0, NULL, 0, GFP_KERNEL);
 		break;
 	case SME_DISCONNECTED:
 	default:
@@ -1791,16 +1719,12 @@ static int ath6kl_close(struct net_device *dev)
 	/* Stop ACL. */
 	ath6kl_ap_acl_stop(vif);
 
-	/* Stop Admission-Control */
-	ath6kl_ap_admc_stop(vif);
-
 	ath6kl_disconnect(vif);
 
 	vif->sme_state = SME_DISCONNECTED;
 	clear_bit(CONNECTED, &vif->flags);
 	clear_bit(CONNECT_PEND, &vif->flags);
 	clear_bit(CONNECT_HANDSHAKE_PROTECT, &vif->flags);
-	clear_bit(PS_STICK, &vif->flags);
 	del_timer(&vif->shprotect_timer);
 
 	if (test_bit(WMI_READY, &ar->flag)) {
@@ -2049,8 +1973,6 @@ static int ath6kl_ioctl_standard(struct net_device *dev,
 						(user_cmd + 4),
 						NULL,
 						(android_cmd.used_len - 4));
-				else if (strstr(user_cmd, "SET_AP_WPS_P2P_IE"))
-					ret = 0; /* To avoid AP/GO up stuck. */
 				else {
 					ath6kl_dbg(ATH6KL_DBG_TRC,
 						"not yet support \"%s\"\n",
@@ -2117,12 +2039,8 @@ static int ath6kl_ioctl_standard(struct net_device *dev,
 		break;
 	}
 	default:
-#if defined(ATHTST_SUPPORT) || defined(ACL_SUPPORT)
-		return ath6kl_ce_ioctl(dev, rq, cmd);
-#else
 		ret = -EOPNOTSUPP;
 		break;
-#endif
 	}
 
 	return ret;
@@ -2244,27 +2162,8 @@ int ath6kl_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 					   support WiFi-Direct Cert. */
 	case ATH6KL_IOCTL_STANDARD03:	/* BTC command */
 	case ATH6KL_IOCTL_STANDARD12:	/* hole, please reserved */
-#ifdef ATHTST_SUPPORT
-	case ATHCFG_WCMD_IOCTL:	/* athtst */
-#else
-	case ATH6KL_IOCTL_STANDARD15:	/* hole, please reserved */
-#endif
-#ifdef CE_SUPPORT
-case IEEE80211_IOCTL_KICKMAC:
-#endif
-#ifdef ACL_SUPPORT
-	case IEEE80211_IOCTL_SETPARAM:
-	case IEEE80211_IOCTL_GETPARAM:
-	case IEEE80211_IOCTL_SETMLME:
-	case IEEE80211_IOCTL_ADDMAC:
-	case IEEE80211_IOCTL_DELMAC:
-	case IEEE80211_IOCTL_GET_MACADDR:
-#endif
-#ifdef TX99_SUPPORT
-	case SIOCIOCTLTX99:/* TX99 */
-#else
 	case ATH6KL_IOCTL_STANDARD13:	/* TX99 */
-#endif
+	case ATH6KL_IOCTL_STANDARD15:	/* hole, please reserved */
 		ret = ath6kl_ioctl_standard(dev, rq, cmd);
 		break;
 	case ATH6KL_IOCTL_WEXT_PRIV26:	/* endpoint loopback purpose */
@@ -2316,28 +2215,14 @@ static struct net_device_ops ath6kl_netdev_ops = {
 
 void init_netdev(struct net_device *dev)
 {
-	struct ath6kl_vif *vif = netdev_priv(dev);
-
-	vif->needed_headroom = ETH_HLEN +
-					sizeof(struct ath6kl_llc_snap_hdr) +
-					sizeof(struct wmi_data_hdr) +
-					HTC_HDR_LENGTH +
-					WMI_MAX_TX_META_SZ +
-					ATH6KL_HTC_ALIGN_BYTES;
-
-#ifdef CE_OLD_KERNEL_SUPPORT_2_6_23
-	dev->open = ath6kl_open;
-	dev->stop = ath6kl_close;
-	dev->hard_start_xmit = ath6kl_start_tx;
-	dev->get_stats = ath6kl_get_stats;
-	dev->do_ioctl = ath6kl_ioctl;
-#else
 	dev->netdev_ops = &ath6kl_netdev_ops;
-	dev->needed_headroom = vif->needed_headroom;
-#endif
-
 	dev->destructor = free_netdev;
 	dev->watchdog_timeo = ATH6KL_TX_TIMEOUT;
+
+	dev->needed_headroom = ETH_HLEN;
+	dev->needed_headroom += sizeof(struct ath6kl_llc_snap_hdr) +
+				sizeof(struct wmi_data_hdr) + HTC_HDR_LENGTH
+				+ WMI_MAX_TX_META_SZ + ATH6KL_HTC_ALIGN_BYTES;
 
 	return;
 }

@@ -164,19 +164,11 @@ void ath6kl_btcoex_adjust_params(struct ath6kl *ar,
 	{
 		struct wmi_set_btcoex_fe_antenna_cmd *cmd =
 			(struct wmi_set_btcoex_fe_antenna_cmd *)buf;
-
-		if (ar->version.target_ver == AR6004_HW_3_0_VERSION) {
-			/* use WMI_BTCOEX_FE_ANT_DUAL_SH_BT_LOW_ISO
-			 by default for McK2.0.4 */
+		/* fill in correct antenna configuration from
+		   board data if valid */
+		if (ar->fw_board[BDATA_ANTCONF_OFFSET])
 			cmd->fe_antenna_type =
-					WMI_BTCOEX_FE_ANT_DUAL_SH_BT_LOW_ISO;
-		} else {
-			/* fill in correct antenna configuration from
-			board data if valid */
-			if (ar->fw_board[BDATA_ANTCONF_OFFSET])
-				cmd->fe_antenna_type =
-					ar->fw_board[BDATA_ANTCONF_OFFSET];
-		}
+				ar->fw_board[BDATA_ANTCONF_OFFSET];
 	}
 	break;
 	case WMI_SET_BTCOEX_COLOCATED_BT_DEV_CMDID:

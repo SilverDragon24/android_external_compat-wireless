@@ -681,47 +681,11 @@ void ath6kl_p2p_flowctrl_conn_list_deinit(struct ath6kl *ar)
 	return;
 }
 
-/* before calling this, p2p_flowctrl_lock shall be acquired,
-  *  pcontainer, preclaim shall be init by caller.
-  */
-void ath6kl_p2p_flowctrl_conn_collect_by_conn(
-	struct ath6kl_fw_conn_list *fw_conn,
-	struct list_head *pcontainer,
-	int *preclaim)
-{
-	struct htc_packet *packet, *tmp_pkt;
-
-	if (!list_empty(&fw_conn->re_queue)) {
-		list_for_each_entry_safe(packet,
-					tmp_pkt,
-					&fw_conn->re_queue,
-					list) {
-			list_del(&packet->list);
-			packet->status = 0;
-			list_add_tail(&packet->list, pcontainer);
-			fw_conn->sche_tx_queued--;
-			*preclaim += 1;
-		}
-	}
-
-	if (!list_empty(&fw_conn->conn_queue)) {
-		list_for_each_entry_safe(packet,
-					tmp_pkt,
-					&fw_conn->conn_queue,
-					list) {
-			list_del(&packet->list);
-			packet->status = 0;
-			list_add_tail(&packet->list, pcontainer);
-			fw_conn->sche_tx_queued--;
-			*preclaim += 1;
-		}
-	}
-}
-
 void ath6kl_p2p_flowctrl_conn_list_cleanup(struct ath6kl *ar)
 {
 	struct ath6kl_p2p_flowctrl *p2p_flowctrl = ar->p2p_flowctrl_ctx;
 	struct ath6kl_fw_conn_list *fw_conn;
+	struct htc_packet *packet, *tmp_pkt;
 	struct list_head container;
 	int i, reclaim = 0;
 
@@ -732,9 +696,31 @@ void ath6kl_p2p_flowctrl_conn_list_cleanup(struct ath6kl *ar)
 	for (i = 0; i < NUM_CONN; i++) {
 		spin_lock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
 		fw_conn = &p2p_flowctrl->fw_conn_list[i];
-		ath6kl_p2p_flowctrl_conn_collect_by_conn(fw_conn,
-			&container,
-			&reclaim);
+		if (!list_empty(&fw_conn->re_queue)) {
+			list_for_each_entry_safe(packet,
+						tmp_pkt,
+						&fw_conn->re_queue,
+						list) {
+				list_del(&packet->list);
+				packet->status = 0;
+				list_add_tail(&packet->list, &container);
+				fw_conn->sche_tx_queued--;
+				reclaim++;
+			}
+		}
+
+		if (!list_empty(&fw_conn->conn_queue)) {
+			list_for_each_entry_safe(packet,
+						tmp_pkt,
+						&fw_conn->conn_queue,
+						list) {
+				list_del(&packet->list);
+				packet->status = 0;
+				list_add_tail(&packet->list, &container);
+				fw_conn->sche_tx_queued--;
+				reclaim++;
+			}
+		}
 		spin_unlock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
 	}
 
@@ -777,6 +763,7 @@ void ath6kl_p2p_flowctrl_conn_list_cleanup_by_if(
 	struct ath6kl *ar = vif->ar;
 	struct ath6kl_p2p_flowctrl *p2p_flowctrl = ar->p2p_flowctrl_ctx;
 	struct ath6kl_fw_conn_list *fw_conn;
+	struct htc_packet *packet, *tmp_pkt;
 	struct list_head container;
 	int i, reclaim = 0;
 	u8 vif_conn_id = ATH6KL_P2P_FLOWCTRL_NULL_CONNID;
@@ -798,9 +785,34 @@ void ath6kl_p2p_flowctrl_conn_list_cleanup_by_if(
 		if (fw_conn->parent_connId != vif_conn_id)
 			continue;
 
-		ath6kl_p2p_flowctrl_conn_collect_by_conn(fw_conn,
-			&container,
-			&reclaim);
+		if (!list_empty(&fw_conn->re_queue)) {
+			list_for_each_entry_safe(packet,
+					tmp_pkt,
+					&fw_conn->re_queue,
+					list) {
+
+				list_del(&packet->list);
+				packet->status = 0;
+				list_add_tail(&packet->list,
+					&container);
+				fw_conn->sche_tx_queued--;
+				reclaim++;
+			}
+		}
+
+		if (!list_empty(&fw_conn->conn_queue)) {
+			list_for_each_entry_safe(packet,
+					tmp_pkt,
+					&fw_conn->conn_queue,
+					list) {
+				list_del(&packet->list);
+				packet->status = 0;
+				list_add_tail(&packet->list,
+					&container);
+				fw_conn->sche_tx_queued--;
+				reclaim++;
+			}
+		}
 	}
 	spin_unlock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
 
@@ -878,10 +890,9 @@ void ath6kl_p2p_flowctrl_tx_schedule(struct ath6kl *ar)
 							tmp_pkt,
 							&fw_conn->re_queue,
 							list) {
+					list_del(&packet->list);
 					if (packet == NULL)
 						continue;
-
-					list_del(&packet->list);
 
 					if (packet->endpoint >= ENDPOINT_MAX)
 						continue;
@@ -1009,7 +1020,7 @@ void ath6kl_p2p_flowctrl_state_change(struct ath6kl *ar)
 		flowctrl_allowed = _check_can_send(ar, fw_conn);
 		if (!flowctrl_allowed && fw_conn->previous_can_send) {
 			spin_lock_bh(&ar->htc_target->tx_lock);
-			for (eid = ENDPOINT_5; eid >= ENDPOINT_2; eid--) {
+			for (eid = ENDPOINT_5; eid <= ENDPOINT_2; eid--) {
 				endpoint = &ar->htc_target->endpoint[eid];
 				tx_queue = &endpoint->txq;
 				if (list_empty(tx_queue))
@@ -1046,13 +1057,13 @@ void ath6kl_p2p_flowctrl_state_change(struct ath6kl *ar)
 				}
 			}
 			spin_unlock_bh(&ar->htc_target->tx_lock);
+		} else if (flowctrl_allowed) {
+			ath6kl_p2p_flowctrl_netif_transition(
+				ar, ATH6KL_P2P_FLOWCTRL_NETIF_WAKE);
 		}
 		fw_conn->previous_can_send = flowctrl_allowed;
 		spin_unlock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
 	}
-
-	ath6kl_p2p_flowctrl_netif_transition(
-				ar, ATH6KL_P2P_FLOWCTRL_NETIF_WAKE);
 
 	ath6kl_dbg(ATH6KL_DBG_FLOWCTRL,
 		"p2p_flowctrl state_change %p re_tx %d re_tx_aging %d\n",
@@ -1100,23 +1111,21 @@ void ath6kl_p2p_flowctrl_set_conn_id(struct ath6kl_vif *vif,
 	struct ath6kl *ar = vif->ar;
 	struct ath6kl_p2p_flowctrl *p2p_flowctrl = ar->p2p_flowctrl_ctx;
 	struct ath6kl_fw_conn_list *fw_conn;
-	struct list_head container;
-	int reclaim = 0;
 
 	WARN_ON(!p2p_flowctrl);
-
-	INIT_LIST_HEAD(&container);
 
 	spin_lock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
 	fw_conn = &p2p_flowctrl->fw_conn_list[connId];
 	if (mac_addr) {
 		if (fw_conn->sche_tx_queued != 0) {
-			ath6kl_p2p_flowctrl_conn_collect_by_conn(fw_conn,
-				&container,
-				&reclaim);
-			spin_unlock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
-			ath6kl_tx_complete(ar->htc_target, &container);
-			spin_lock_bh(&p2p_flowctrl->p2p_flowctrl_lock);
+			ath6kl_err("memory leakage? [%d/%02x] %d,%d,%d,%d\n",
+					fw_conn->connId,
+					fw_conn->connect_status,
+					fw_conn->sche_tx,
+					fw_conn->sche_re_tx,
+					fw_conn->sche_re_tx_aging,
+					fw_conn->sche_tx_queued);
+			WARN_ON(1);
 		}
 
 		fw_conn->vif = vif;
@@ -1306,7 +1315,7 @@ bool ath6kl_p2p_frame_retry(struct ath6kl *ar, u8 *frm, int len)
 		(action_frame->action_subtype == WLAN_P2P_GO_NEG_CONF));
 }
 
-bool ath6kl_p2p_is_p2p_frame(struct ath6kl *ar, const u8 *frm, size_t len)
+bool ath6kl_p2p_is_p2p_frame(struct ath6kl *ar, u8 *frm, int len)
 {
 	struct ieee80211_mgmt *action = (struct ieee80211_mgmt *)frm;
 	struct ieee80211_p2p_action_public *action_public;
@@ -1329,312 +1338,6 @@ bool ath6kl_p2p_is_p2p_frame(struct ath6kl *ar, const u8 *frm, size_t len)
 		(action_vendor->oui == cpu_to_be32((WLAN_OUI_WFA << 8) |
 						   (WLAN_OUI_TYPE_WFA_P2P))))
 		return true;
-
-	return false;
-}
-
-void ath6kl_p2p_connect_event(struct ath6kl_vif *vif,
-				u8 beacon_ie_len,
-				u8 assoc_req_len,
-				u8 assoc_resp_len,
-				u8 *assoc_info)
-{
-	u8 *pie, *peie;
-	struct ieee80211_ht_cap *ht_cap_ie = NULL;
-	bool vendor_spec_ie_intel = false;
-
-	if (vif->nw_type != INFRA_NETWORK)
-		return;
-
-	/* Now, only p2p_war_bad_intel_go need to do something here. */
-	if (!vif->ar->p2p_war_bad_intel_go)
-		return;
-
-	/* AssocResp IEs */
-	pie = assoc_info + beacon_ie_len + assoc_req_len +
-		(sizeof(u16) * 3); /* capinfo + status code + associd */
-	peie = assoc_info + beacon_ie_len + assoc_req_len + assoc_resp_len;
-
-	while (pie < peie) {
-		switch (*pie) {
-		case WLAN_EID_HT_CAPABILITY:
-			if (pie[1] >= sizeof(struct ieee80211_ht_cap))
-				ht_cap_ie =
-					(struct ieee80211_ht_cap *)(pie + 2);
-			break;
-		case WLAN_EID_VENDOR_SPECIFIC:
-			if (pie[1] > 0) {
-				if (pie[1] == 0x0b &&
-				     pie[2] == 0x00 &&
-				     pie[3] == 0x17 &&
-				     pie[4] == 0x35 &&
-				     pie[5] == 0x01)
-					vendor_spec_ie_intel = true;
-			}
-			break;
-		}
-		pie += pie[1] + 2;
-	}
-
-	/* WAR EV119712 */
-	if (ht_cap_ie &&
-	    vendor_spec_ie_intel &&
-	    (vif->ar->target_subtype & TARGET_SUBTYPE_2SS)) {
-		if (((ht_cap_ie->cap_info & IEEE80211_HT_CAP_SM_PS) ==
-		     (WLAN_HT_CAP_SM_PS_DYNAMIC <<
-					IEEE80211_HT_CAP_SM_PS_SHIFT)) &&
-		    (ht_cap_ie->mcs.rx_mask[1])) {
-			ath6kl_info("Enable Intel-GO compatibility.\n");
-			ath6kl_wmi_set_fix_rates(vif->ar->wmi,
-						vif->fw_vif_idx,
-						(0x00000000000fffffULL));
-
-			set_bit(PS_STICK, &vif->flags);
-			ath6kl_wmi_powermode_cmd(vif->ar->wmi,
-						vif->fw_vif_idx,
-						MAX_PERF_POWER);
-		}
-	}
-
-	return;
-}
-
-static void _p2p_pending_connect_work(struct work_struct *work)
-{
-	struct ath6kl_vif *vif = NULL;
-	struct p2p_pending_connect_info *pending_connect_info = NULL;
-	const u8 *bssid, *req_ie, *resp_ie;
-
-	if (!work)
-		goto err;
-
-	vif = container_of(work, struct ath6kl_vif,
-		work_pending_connect.work);
-	if (!vif)
-		goto err;
-
-	pending_connect_info = vif->pending_connect_info;
-	if (!vif->pending_connect_info)
-		goto err;
-
-	bssid = req_ie = resp_ie = NULL;
-	if (!is_zero_ether_addr(pending_connect_info->bssid))
-		bssid = pending_connect_info->bssid;
-	if (pending_connect_info->req_ie_len)
-		req_ie = pending_connect_info->req_ie;
-	if (pending_connect_info->resp_ie_len)
-		resp_ie = pending_connect_info->resp_ie;
-
-	/* Send connect event to cfg80211 */
-	cfg80211_connect_result(vif->ndev,
-				bssid,
-				req_ie,
-				pending_connect_info->req_ie_len,
-				resp_ie,
-				pending_connect_info->resp_ie_len,
-				pending_connect_info->status,
-				pending_connect_info->gfp);
-
-	kfree(vif->pending_connect_info);
-	vif->pending_connect_info = NULL;
-
-	return;
-err:
-	ath6kl_err("P2P pending connect work fail! vif %p work %p info %p\n",
-			vif, work, pending_connect_info);
-
-	return;
-}
-
-static inline bool _p2p_need_pending_connect(struct ath6kl_vif *vif,
-						const u8 *bssid)
-{
-	bool need_pending = false;
-
-	/* WAR CR468120 */
-	if ((vif->ar->p2p_war_bad_broadcom_go) &&
-	    (vif->sme_state == SME_CONNECTED) &&
-	    (vif->connect_ctrl_flags & CONNECT_WPS_FLAG) &&
-	    (vif->wdev.iftype == NL80211_IFTYPE_P2P_CLIENT)) {
-		struct cfg80211_bss *bss;
-
-		bss = cfg80211_get_bss(vif->wdev.wiphy,
-				NULL,
-				vif->bssid,
-				vif->ssid,
-				vif->ssid_len,
-				WLAN_CAPABILITY_ESS,
-				WLAN_CAPABILITY_ESS);
-		if (bss) {
-			u8 *pie, *peie;
-
-			pie = peie = NULL;
-
-#ifdef CFG80211_SAFE_BSS_INFO_ACCESS
-			rcu_read_lock();
-			if (bss->ies) {
-				pie = (u8 *)(bss->ies->data);
-				peie = pie + bss->ies->len;
-			}
-#else
-			if (bss->information_elements) {
-				pie = bss->information_elements;
-				peie = pie + bss->len_information_elements;
-			}
-#endif
-
-			while (pie < peie) {
-				if (*pie == WLAN_EID_VENDOR_SPECIFIC) {
-					if ((pie[1] > 0) &&
-					    (pie[2] == 0x00 &&
-					     pie[3] == 0x10 &&
-					     pie[4] == 0x18))
-						need_pending = true;
-				}
-				pie += pie[1] + 2;
-			}
-
-#ifdef CFG80211_SAFE_BSS_INFO_ACCESS
-			rcu_read_unlock();
-#endif
-			cfg80211_put_bss(bss);
-		}
-	}
-
-	return need_pending;
-}
-
-static inline bool _p2p_flush_pending_connect(struct ath6kl_vif *vif)
-{
-	if ((vif->ar->p2p_war_bad_broadcom_go) &&
-	    (vif->sme_state == SME_CONNECTED) &&
-	    (vif->wdev.iftype == NL80211_IFTYPE_P2P_CLIENT) &&
-	    (vif->pending_connect_info)) {
-		ath6kl_info("Flush pending connect work first.\n");
-		flush_delayed_work(&vif->work_pending_connect);
-	}
-
-	return false;
-}
-
-bool ath6kl_p2p_pending_connect_event(struct ath6kl_vif *vif,
-					const u8 *bssid,
-					const u8 *req_ie,
-					size_t req_ie_len,
-					const u8 *resp_ie,
-					size_t resp_ie_len,
-					u16 status,
-					gfp_t gfp)
-{
-#define _P2P_PENDING_CONNECT_TIME	800	/* in ms. */
-	struct p2p_pending_connect_info *pending_connect_info;
-
-	if (_p2p_need_pending_connect(vif, bssid)) {
-		if ((req_ie_len > ATH6KL_P2P_MAX_PENDING_INFO_IELEN) ||
-		    (resp_ie_len > ATH6KL_P2P_MAX_PENDING_INFO_IELEN))
-			return false;
-
-		vif->pending_connect_info =
-			kzalloc(sizeof(struct p2p_pending_connect_info),
-				GFP_ATOMIC);
-		if (vif->pending_connect_info == NULL)
-			return false;
-
-		pending_connect_info = vif->pending_connect_info;
-		if (bssid)
-			memcpy(pending_connect_info->bssid, bssid, ETH_ALEN);
-		if (req_ie) {
-			memcpy(pending_connect_info->req_ie,
-				req_ie,
-				req_ie_len);
-			pending_connect_info->req_ie_len = req_ie_len;
-		}
-		if (resp_ie) {
-			memcpy(pending_connect_info->resp_ie,
-				resp_ie,
-				resp_ie_len);
-			pending_connect_info->resp_ie_len = resp_ie_len;
-		}
-		pending_connect_info->status = status;
-		pending_connect_info->gfp = gfp;
-
-		INIT_DELAYED_WORK(&vif->work_pending_connect,
-				_p2p_pending_connect_work);
-		schedule_delayed_work(&vif->work_pending_connect,
-				(msecs_to_jiffies(_P2P_PENDING_CONNECT_TIME)));
-
-		ath6kl_info("Enable Broadcom-GO compatibility, delay %d ms.\n",
-				_P2P_PENDING_CONNECT_TIME);
-
-		return true;
-	} else
-		return false;
-#undef _P2P_PENDING_CONNECT_TIME
-}
-
-void ath6kl_p2p_pending_disconnect_event(struct ath6kl_vif *vif,
-					u16 reason,
-					u8 *ie,
-					size_t ie_len,
-					gfp_t gfp)
-{
-	/* Flush pending work first if already fired. */
-	_p2p_flush_pending_connect(vif);
-
-	return;
-}
-
-bool ath6kl_p2p_ie_append(struct ath6kl_vif *vif, u8 mgmt_frame_type)
-{
-	struct ath6kl *ar = vif->ar;
-
-	/*
-	 * IOT : Some older APs' implementation may reject connection if
-	 *       concuurrent STA interface include P2P IEs even these APs
-	 *       don't understand P2P IEs.
-	 */
-	if (ar->p2p_concurrent &&
-	    ar->p2p_dedicate &&
-	    (vif->fw_vif_idx == 0) &&
-	    (vif->nw_type == INFRA_NETWORK) &&
-	    (ar->p2p_ie_not_append & mgmt_frame_type))
-		return false;
-
-	return true;
-}
-
-/* P802.11REVmb */
-static struct p2p_oper_chan ath6kl_p2p_oper_chan[] = {
-	{ 81,  2412, 2472, 5,  P2P_OPER_CHAN_BW_HT20},       /* CH1   - CH13 */
-	{ 82,  2484, 2484, 5,  P2P_OPER_CHAN_BW_HT20},       /* CH14  - CH14 */
-	{ 115, 5180, 5240, 20, P2P_OPER_CHAN_BW_HT20},       /* CH36  - CH48 */
-	{ 116, 5180, 5220, 20, P2P_OPER_CHAN_BW_HT40_PLUS},  /* CH36  - CH44 */
-	{ 117, 5200, 5240, 20, P2P_OPER_CHAN_BW_HT40_MINUS}, /* CH40  - CH48 */
-	{ 124, 5745, 5805, 20, P2P_OPER_CHAN_BW_HT20},       /* CH149 - CH161 */
-	{ 125, 5745, 5825, 20, P2P_OPER_CHAN_BW_HT20},       /* CH149 - CH165 */
-	{ 126, 5745, 5785, 20, P2P_OPER_CHAN_BW_HT40_PLUS},  /* CH149 - CH157 */
-	{ 127, 5765, 5805, 20, P2P_OPER_CHAN_BW_HT40_MINUS}, /* CH153 - CH161 */
-	{ 0, 0, 0, 0, P2P_OPER_CHAN_BW_NULL},
-};
-
-bool ath6kl_p2p_is_p2p_channel(u32 freq)
-{
-	struct p2p_oper_chan *p2p_oper_chan_map, *p2p_oper_chan;
-	u32 op_class, p2p_freq;
-
-	p2p_oper_chan_map = ath6kl_p2p_oper_chan;
-
-	for (op_class = 0; p2p_oper_chan_map[op_class].oper_class; op_class++) {
-		p2p_oper_chan  = &p2p_oper_chan_map[op_class];
-		for (p2p_freq = p2p_oper_chan->min_chan_freq;
-		     p2p_freq <= p2p_oper_chan->max_chan_freq;
-		     p2p_freq += p2p_oper_chan->inc_freq) {
-			if (freq == p2p_freq) {
-				/* TODO : check bandwidth */
-				return true;
-			}
-		}
-	}
 
 	return false;
 }

@@ -100,8 +100,7 @@ static void htcoex_get_coexinfo(struct htcoex_bss_info *coex_bss,
 		}
 
 		if (i == coex_info->num_chans) {
-			/* chans only get size 14 */
-			BUG_ON(coex_info->num_chans >= 14);
+			BUG_ON(coex_info->num_chans > 14);
 			coex_info->chans[coex_info->num_chans++] = chan_id;
 		}
 	}
@@ -508,8 +507,6 @@ void ath6kl_htcoex_connect_event(struct ath6kl_vif *vif)
 {
 	struct htcoex *coex = vif->htcoex_ctx;
 	struct cfg80211_bss *bss;
-	u8 *ies = NULL;
-	u16 ies_len = 0;
 
 	if (vif->nw_type != INFRA_NETWORK)
 		return;
@@ -526,25 +523,12 @@ void ath6kl_htcoex_connect_event(struct ath6kl_vif *vif)
 		return;
 	}
 
-#ifdef CFG80211_SAFE_BSS_INFO_ACCESS
-	rcu_read_lock();
-	if (bss->ies) {
-		ies = (u8 *)(bss->ies->data);
-		ies_len = bss->ies->len;
-	}
-#else
-	if (bss->information_elements) {
-		ies = bss->information_elements;
-		ies_len = bss->len_information_elements;
-	}
-#endif
-
 	/* Start if BSS is 11n and 2G channel. */
 	if ((coex->flags & ATH6KL_HTCOEX_FLAGS_ENABLED) &&
 		(bss->channel->band == IEEE80211_BAND_2GHZ) &&
 		(htcoex_get_elem(WLAN_EID_HT_CAPABILITY,
-				 ies,
-				 ies_len) != NULL)){
+				 bss->information_elements,
+				 bss->len_information_elements) != NULL)){
 		if (coex->flags & ATH6KL_HTCOEX_FLAGS_START)
 			del_timer(&coex->scan_timer);
 
@@ -563,10 +547,6 @@ void ath6kl_htcoex_connect_event(struct ath6kl_vif *vif)
 
 	} else
 		coex->flags &= ~ATH6KL_HTCOEX_FLAGS_START;
-
-#ifdef CFG80211_SAFE_BSS_INFO_ACCESS
-	rcu_read_unlock();
-#endif
 
 	coex->num_scan = 0;
 	coex->tolerant40_cnt = 0;

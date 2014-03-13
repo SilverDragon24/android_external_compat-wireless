@@ -1,4 +1,4 @@
-/*
+/* Copyright (c) 2012 The Linux Foundation. All Rights Reserved.
  * Copyright (c) 2004-2011 Atheros Communications Inc.
  * Copyright (c) 2011-2012 Qualcomm Atheros, Inc.
  *
@@ -3799,7 +3799,42 @@ void ath6kl_cfg80211_stop_all(struct ath6kl *ar)
 		ath6kl_cfg80211_stop(vif);
 }
 
+#define COUNTRY_CODE_LEN 2
+static int ath6kl_set_country_code(struct ath6kl *ar)
+{
+	struct file *fp;
+	int ret, rdlen;
+	static char buf[COUNTRY_CODE_LEN+1];
+
+	ret = 0;
+	fp = filp_open("/data/misc/wifi/country", O_RDONLY, 0);
+	if (IS_ERR(fp)) {
+		ret = -1;
+		fp = NULL;
+	}
+
+	if (fp != NULL) {
+		fp->f_pos = 0;
+		rdlen = kernel_read(fp, fp->f_pos, buf, COUNTRY_CODE_LEN);
+		if (rdlen != COUNTRY_CODE_LEN)
+			ret = -2;
+		buf[COUNTRY_CODE_LEN] = 0;
+		ath6kl_info("%s: the content of file /data/misc/wifi/country is %s", __func__, buf);
+		filp_close(fp, NULL);
+	}
+
+	if (!ret)
+		ret = ath6kl_wmi_set_regdomain_cmd(ar->wmi, buf);
+
+	if (ret) {
+		ath6kl_err("%s: failed to set regdomain, ret=%d\n", __func__, ret);
+	}
+
+	return ret;
+}
+
 #ifdef CONFIG_ATH6KL_REGDOMAIN
+
 static int ath6kl_cfg80211_reg_notify(struct wiphy *wiphy,
 				      struct regulatory_request *request)
 {
@@ -3814,7 +3849,10 @@ static int ath6kl_cfg80211_reg_notify(struct wiphy *wiphy,
 		   request->processed ? " processed" : "",
 		   request->initiator);
 
-	ret = ath6kl_wmi_set_regdomain_cmd(ar->wmi, request->alpha2);
+	ret = ath6kl_set_country_code(ar);
+	if (ret)
+		ret = ath6kl_wmi_set_regdomain_cmd(ar->wmi, request->alpha2);
+
 	if (ret) {
 		ath6kl_err("failed to set regdomain: %d\n", ret);
 		return ret;
@@ -3943,6 +3981,7 @@ int ath6kl_register_ieee80211_hw(struct ath6kl *ar)
 	/* FIXME: add firmware capability */
 	wiphy->reg_notifier = ath6kl_cfg80211_reg_notify;
 #endif
+	ath6kl_set_country_code(ar);
 
 	/* max num of ssids that can be probed during scanning */
 	wiphy->max_scan_ssids = MAX_PROBED_SSIDS;

@@ -19,7 +19,6 @@
 #include "htc-ops.h"
 #include "epping.h"
 #include <linux/version.h>
-#include <net/arp.h>
 
 /* 802.1d to AC mapping. Refer pg 57 of WMM-test-plan-v1.2 */
 static const u8 up_to_ac[] = {
@@ -417,52 +416,6 @@ bool ath6kl_mgmt_powersave_ap(struct ath6kl_vif *vif,
 	return ps_queued;
 }
 
-static inline  void __ath6kl_arp_parse_offload(struct ath6kl_vif *vif,
-					       struct sk_buff *skb)
-{
-	struct ath6kl *ar = vif->ar;
-	struct ethhdr *eth_hdr = (struct ethhdr *) skb->data;
-	struct ath6kl_llc_snap_hdr *llc_hdr;
-	struct arphdr *arp_hdr;
-	unsigned char *ar_sip;
-	unsigned char src_ip[4];
-	u16 ether_type;
-	int hdr_size;
-
-	if (is_ethertype(be16_to_cpu(eth_hdr->h_proto))) {
-		/* packet is in DIX format */
-		ether_type = eth_hdr->h_proto;
-		hdr_size = sizeof(struct ethhdr);
-	} else {
-		/* packet is in 802.3 format */
-		llc_hdr = (struct ath6kl_llc_snap_hdr *)(skb->data
-			+ sizeof(struct ethhdr));
-		ether_type = llc_hdr->eth_type;
-		hdr_size = sizeof(struct ethhdr)
-			+ sizeof(struct ath6kl_llc_snap_hdr);
-	}
-
-	if (ether_type == htons(ETH_P_ARP)) {
-		arp_hdr = (struct arphdr *)(skb->data + hdr_size);
-		ar_sip = skb->data + hdr_size
-			+ sizeof(struct arphdr) + ETH_ALEN;
-
-		if (arp_hdr->ar_op == htons(ARPOP_REPLY)) {
-			memcpy(src_ip, ar_sip, 4);
-
-			vif->arp_offload_ip_set = 0;
-			if (!ath6kl_wmi_set_arp_offload_ip_cmd(ar->wmi,
-				src_ip)) {
-				vif->arp_offload_ip_set = 1;
-				ath6kl_dbg(ATH6KL_DBG_WOWLAN,
-				"%s: enable arp offload %d.%d.%d.%d\n",
-				__func__, src_ip[0], src_ip[1]
-				, src_ip[2], src_ip[3]);
-			}
-		}
-	}
-}
-
 /* Tx functions */
 
 int ath6kl_control_tx(void *devt, struct sk_buff *skb,
@@ -568,7 +521,7 @@ int ath6kl_data_tx(struct sk_buff *skb, struct net_device *dev,
 	}
 
 	if (test_bit(WMI_ENABLED, &ar->flag)) {
-		if (skb_headroom(skb) < vif->needed_headroom) {
+		if (skb_headroom(skb) < dev->needed_headroom) {
 			struct sk_buff *tmp_skb = ath6kl_buf_alloc(skb->len);
 
 			if (tmp_skb == NULL) {
@@ -581,11 +534,6 @@ int ath6kl_data_tx(struct sk_buff *skb, struct net_device *dev,
 			kfree_skb(skb);
 			skb = tmp_skb;
 		}
-
-		/* sniffer ARP reply, enable ARP offload by default */
-		if ((vif == ath6kl_vif_first(ar))
-			&& (vif->nw_type == INFRA_NETWORK))
-			__ath6kl_arp_parse_offload(vif, skb);
 
 		if (ath6kl_wmi_dix_2_dot3(ar->wmi, skb)) {
 			ath6kl_err("ath6kl_wmi_dix_2_dot3 failed\n");
@@ -1058,9 +1006,6 @@ void ath6kl_tx_complete(struct htc_target *target,
 		if (!skb || !skb->data)
 			goto fatal;
 
-		if (eid == ENDPOINT_UNUSED || eid == ENDPOINT_MAX)
-			goto fatal;
-
 		__skb_queue_tail(&skb_queue, skb);
 
 		if (!status && (packet->act_len != skb->len))
@@ -1142,8 +1087,7 @@ void ath6kl_tx_complete(struct htc_target *target,
 
 	if (test_bit(MCC_ENABLED, &ar->flag)) {
 		endpoint = &ar->htc_target->endpoint[eid];
-		/*if (ar && endpoint && packet && ar->htc_target) {*/
-		if (endpoint && packet && ar->htc_target) {
+		if (ar && endpoint && packet && ar->htc_target) {
 			struct list_head *tx_queue;
 
 			tx_queue = &endpoint->txq;
@@ -2294,28 +2238,8 @@ void ath6kl_rx(struct htc_target *target, struct htc_packet *packet)
 			/* nothing to deliver up the stack */
 			return;
 		}
-#ifdef ATHTST_SUPPORT
-		/* record each connected sta rssi */
-		if (conn->avg_data_rssi == 0) {
-			if ((dhdr->rssi) >= RSSI_LPF_THRESHOLD)
-				conn->avg_data_rssi = ATH_RSSI_IN(dhdr->rssi);
-		} else {
-			ATH_RSSI_LPF(conn->avg_data_rssi, dhdr->rssi);
-		}
-#endif
 	}
-#ifdef ATHTST_SUPPORT
-	if (vif->nw_type != AP_NETWORK) {
-		conn = &vif->sta_list[0];
-		/* record each connected sta rssi */
-		if (conn->avg_data_rssi == 0) {
-			if ((dhdr->rssi) >= RSSI_LPF_THRESHOLD)
-				conn->avg_data_rssi = ATH_RSSI_IN(dhdr->rssi);
-		} else {
-			ATH_RSSI_LPF(conn->avg_data_rssi, dhdr->rssi);
-		}
-	}
-#endif
+
 	if (vif->nw_type != AP_NETWORK)
 		conn = &vif->sta_list[0];
 
@@ -2329,80 +2253,6 @@ rx_aggr_process:
 		return;
 
 	ath6kl_deliver_frames_to_nw_stack(vif->ndev, skb);
-}
-
-static void aggr_tx_progressive(struct txtid *txtid, bool tx_timeout)
-{
-	struct ath6kl_vif *vif = txtid->vif;
-	struct aggr_info *aggr = vif->aggr_cntxt;
-	unsigned long now = jiffies;
-
-	/* Only support STA mode now */
-	if (vif->nw_type != INFRA_NETWORK)
-		return;
-
-	txtid->last_num_amsdu++;
-	if (tx_timeout)
-		txtid->last_num_timeout++;
-
-	/* Check it every AGGR_TX_PROG_CHECK_INTVAL */
-	if (aggr->tx_amsdu_progressive &&
-	    ((txtid->last_check_time == 0) ||
-	     (now - txtid->last_check_time > AGGR_TX_PROG_CHECK_INTVAL))) {
-		/*
-		 * Change to high speed when mass of AMSDUs & most of it
-		 * are not-timeout case.
-		 * Back to normal speed when bit of AMSDUs & most of it
-		 * are timeout case.
-		 */
-		if (!aggr->tx_amsdu_progressive_hispeed) {
-			if ((txtid->last_num_amsdu > AGGR_TX_PROG_HS_THRESH) &&
-			    (txtid->last_num_timeout <
-			     (txtid->last_num_amsdu >>
-						AGGR_TX_PROG_HS_FACTOR))) {
-				aggr->tx_amsdu_progressive_hispeed = true;
-				aggr_tx_config(vif,
-						aggr->tx_amsdu_seq_pkt,
-						true,
-						AGGR_TX_PROG_HS_MAX_NUM,
-						AGGR_TX_MAX_PDU_SIZE,
-						AGGR_TX_PROG_HS_TIMEOUT);
-
-				ath6kl_dbg(ATH6KL_DBG_WLAN_TX_AMSDU,
-					"%s: AMSDU change to high speed %d %d\n",
-					__func__,
-					txtid->last_num_amsdu,
-					txtid->last_num_timeout);
-			}
-		} else if (aggr->tx_amsdu_progressive_hispeed) {
-			if ((txtid->last_num_amsdu < AGGR_TX_PROG_NS_THRESH) &&
-			    (txtid->last_num_timeout >
-			     (txtid->last_num_amsdu >>
-						AGGR_TX_PROG_NS_FACTOR))) {
-				aggr->tx_amsdu_progressive_hispeed = false;
-				aggr_tx_config(vif,
-						aggr->tx_amsdu_seq_pkt,
-						true,
-						AGGR_TX_MAX_NUM,
-						AGGR_TX_MAX_PDU_SIZE,
-						AGGR_TX_TIMEOUT);
-				ath6kl_dbg(ATH6KL_DBG_WLAN_TX_AMSDU,
-					"%s: AMSDU back to normal speed %d %d\n",
-					__func__,
-					txtid->last_num_amsdu,
-					txtid->last_num_timeout);
-			}
-		}
-
-		/* reset the counters */
-		txtid->last_num_amsdu = 0;
-		txtid->last_num_timeout = 0;
-
-		/* Update to current time */
-		txtid->last_check_time = now;
-	}
-
-	return;
 }
 
 static void aggr_tx_reset_aggr(struct txtid *txtid, bool free_buf,
@@ -2428,7 +2278,6 @@ static void aggr_tx_reset_aggr(struct txtid *txtid, bool free_buf,
 static void aggr_tx_delete_tid_state(struct aggr_conn_info *aggr_conn, u8 tid)
 {
 	struct txtid *txtid;
-	struct aggr_info *aggr = aggr_conn->aggr_cntxt;
 
 	txtid = AGGR_GET_TXTID(aggr_conn, tid);
 
@@ -2444,24 +2293,6 @@ static void aggr_tx_delete_tid_state(struct aggr_conn_info *aggr_conn, u8 tid)
 	txtid->num_flush = 0;
 	txtid->num_tx_null = 0;
 	txtid->num_overflow = 0;
-
-	txtid->last_check_time = 0;
-	txtid->last_num_amsdu = 0;
-	txtid->last_num_timeout = 0;
-	if (aggr->tx_amsdu_progressive_hispeed) {
-		aggr->tx_amsdu_progressive_hispeed = false;
-		aggr_tx_config(aggr->vif,
-				aggr->tx_amsdu_seq_pkt,
-				true,
-				AGGR_TX_MAX_NUM,
-				AGGR_TX_MAX_PDU_SIZE,
-				AGGR_TX_TIMEOUT);
-
-		ath6kl_dbg(ATH6KL_DBG_WLAN_TX_AMSDU,
-				"%s: AMSDU reset to normal speed\n",
-				__func__);
-	}
-
 	spin_unlock_bh(&txtid->lock);
 
 	return;
@@ -2667,7 +2498,6 @@ static int aggr_tx(struct ath6kl_vif *vif, struct ath6kl_sta *sta,
 
 					*skb = amsdu_skb;
 					aggr_tx_reset_aggr(txtid, false, true);
-					aggr_tx_progressive(txtid, false);
 					spin_unlock_bh(&txtid->lock);
 
 					return AGGR_TX_DONE;
@@ -2750,8 +2580,6 @@ static int aggr_tx_tid(struct txtid *txtid, bool timer_stop)
 
 	skb = amsdu_skb;
 	aggr_tx_reset_aggr(txtid, false, timer_stop);
-	if (!timer_stop)
-		aggr_tx_progressive(txtid, true);
 	spin_unlock_bh(&txtid->lock);
 
 	spin_lock_bh(&ar->lock);
@@ -3092,7 +2920,6 @@ void aggr_recv_addba_resp_evt(struct ath6kl_vif *vif, u8 tid,
 
 void aggr_tx_config(struct ath6kl_vif *vif,
 			bool tx_amsdu_seq_pkt,
-			bool tx_amsdu_progressive,
 			u8 tx_amsdu_max_aggr_num,
 			u16 tx_amsdu_max_pdu_len,
 			u16 tx_amsdu_timeout)
@@ -3102,15 +2929,6 @@ void aggr_tx_config(struct ath6kl_vif *vif,
 		struct aggr_info *aggr = vif->aggr_cntxt;
 
 		aggr->tx_amsdu_seq_pkt = tx_amsdu_seq_pkt;
-
-		if (!tx_amsdu_progressive &&
-			aggr->tx_amsdu_progressive)
-			aggr->tx_amsdu_progressive_hispeed = false;
-		else if (tx_amsdu_progressive &&
-			!aggr->tx_amsdu_progressive) {
-			; /* TODO : reset all last_XXXX in txtid */
-		}
-		aggr->tx_amsdu_progressive = tx_amsdu_progressive;
 
 		if (tx_amsdu_timeout == 0)
 			tx_amsdu_timeout = AGGR_TX_TIMEOUT;
@@ -3132,14 +2950,13 @@ void aggr_tx_config(struct ath6kl_vif *vif,
 		aggr->tx_amsdu_max_aggr_num = tx_amsdu_max_aggr_num;
 
 		ath6kl_dbg(ATH6KL_DBG_WLAN_TX_AMSDU,
-			   "%s: aggr-conf, vif%d, pdu_len=%d, aggr_num=%d timeout=%d, seq_pkt=%d, prog=%d\n",
+			   "%s: aggr. config, vif_ifx=%d, tx_amsdu_max_pdu_len=%d, tx_amsdu_max_aggr_num=%d tx_amsdu_timeout=%d, tx_amsdu_seq_pkt=%d\n",
 			   __func__,
 			   vif->fw_vif_idx,
 			   aggr->tx_amsdu_max_pdu_len,
 			   aggr->tx_amsdu_max_aggr_num,
 			   aggr->tx_amsdu_timeout,
-			   aggr->tx_amsdu_seq_pkt,
-			   aggr->tx_amsdu_progressive);
+			   aggr->tx_amsdu_seq_pkt);
 	}
 
 	return;
@@ -3178,11 +2995,6 @@ struct aggr_info *aggr_init(struct ath6kl_vif *vif)
 
 	aggr->tx_amsdu_enable = true;
 	aggr->tx_amsdu_seq_pkt = true;
-#ifdef CONFIG_ANDROID
-	aggr->tx_amsdu_progressive = false;
-#else
-	aggr->tx_amsdu_progressive = true;
-#endif
 	aggr->tx_amsdu_max_aggr_num = AGGR_TX_MAX_NUM;
 	aggr->tx_amsdu_max_aggr_len = AGGR_TX_MAX_AGGR_SIZE - 100;
 	aggr->tx_amsdu_max_pdu_len = AGGR_TX_MAX_PDU_SIZE;
@@ -3343,11 +3155,11 @@ void aggr_module_destroy_conn(struct aggr_conn_info *aggr_conn)
 	for (i = 0; i < NUM_OF_TIDS; i++) {
 		rxtid = AGGR_GET_RXTID(aggr_conn, i);
 
-		if (rxtid->tid_timer_scheduled) {
-			del_timer(&rxtid->tid_timer);
-			rxtid->tid_timer_scheduled = false;
-			rxtid->continuous_count = 0;
-		}
+	if (rxtid->tid_timer_scheduled) {
+		del_timer(&rxtid->tid_timer);
+		rxtid->tid_timer_scheduled = false;
+		rxtid->continuous_count = 0;
+	}
 
 		if (rxtid->hold_q) {
 			for (k = 0; k < rxtid->hold_q_sz; k++)

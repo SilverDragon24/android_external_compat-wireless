@@ -829,6 +829,56 @@ static int ath6kl_set_sdio_pm_caps(struct ath6kl *ar)
 	return ret;
 }
 
+static ssize_t ath6kl_sleep_policy_store(struct device *dev,
+                                struct device_attribute *attr,
+                                const char *buf, size_t size)
+{
+	struct sdio_func *func = dev_to_sdio_func(dev);
+	struct ath6kl_sdio *ar_sdio = sdio_get_drvdata(func);
+	unsigned int new_policy;
+
+	new_policy = simple_strtoul(buf, NULL, 10);
+
+	ath6kl_err("invalid new_policy(%d)\n", (int)new_policy);
+
+	switch (new_policy) {
+	case 0:
+	case 1:
+		ar_sdio->ar->suspend_mode = WLAN_POWER_STATE_DEEP_SLEEP;
+		break;
+	case 2:
+		ar_sdio->ar->suspend_mode = WLAN_POWER_STATE_WOW;
+		break;
+	default:
+		ath6kl_err("invalid new_policy(%d)\n", (int)new_policy);
+		return -EINVAL;
+	}
+
+	return size;
+}
+
+static ssize_t ath6kl_sleep_policy_show(struct device *dev,
+                                 struct device_attribute *attr, char *buf)
+{
+        struct sdio_func *func = dev_to_sdio_func(dev);
+        struct ath6kl_sdio *ar_sdio = sdio_get_drvdata(func);
+
+        return sprintf(buf, "%d\n", ar_sdio->ar->suspend_mode);
+}
+
+static DEVICE_ATTR(sleep_policy, S_IRUGO | S_IWUSR | S_IWGRP,
+                   ath6kl_sleep_policy_show, ath6kl_sleep_policy_store);
+
+static struct attribute *ath6kl_sleep_policy_attrs[] = {
+        &dev_attr_sleep_policy.attr,
+        NULL
+};
+
+static struct attribute_group ath6kl_sleep_policy_attribute = {
+        .attrs = ath6kl_sleep_policy_attrs,
+};
+
+
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,34))
 static int ath6kl_sdio_suspend(struct ath6kl *ar, struct cfg80211_wowlan *wow)
 {
@@ -1279,6 +1329,7 @@ static SIMPLE_DEV_PM_OPS(ath6kl_sdio_pm_ops, ath6kl_sdio_pm_suspend,
 
 #endif /* CONFIG_PM_SLEEP */
 
+static struct kobject *wlan_properties_kobj = NULL;
 static int ath6kl_sdio_probe(struct sdio_func *func,
 			     const struct sdio_device_id *id)
 {
@@ -1336,24 +1387,54 @@ static int ath6kl_sdio_probe(struct sdio_func *func,
 	ar->hif_ops = &ath6kl_sdio_ops;
 	ar->bmi.max_data_size = 256;
 
+        wlan_properties_kobj = kobject_create_and_add( \
+                "android_wlan", NULL);
+        if (wlan_properties_kobj) {
+                ret = sysfs_create_group(&ar_sdio->func->dev.kobj, \
+                        &ath6kl_sleep_policy_attribute);
+                if (ret) {
+                        ath6kl_err("Fail to create sysfs android_wlan dir\n");
+                        goto err_create_group;
+                }
+
+                ret = sysfs_create_link(wlan_properties_kobj, \
+                        &ar_sdio->func->dev.kobj, "wlan_power");
+                if (ret) {
+                        ath6kl_err("Fail to create sleep_policy link\n");
+                        goto err_create_link;
+                }
+        } else {
+                ath6kl_err("Fail to create sleep_policy link\n");
+		ret = -ENOMEM;
+                goto err_create_properties;
+        }
+
 	ath6kl_sdio_set_mbox_info(ar);
 
 	ret = ath6kl_sdio_config(ar);
 	if (ret) {
 		ath6kl_err("Failed to config sdio: %d\n", ret);
-		goto err_core_alloc;
+		goto err_sdio_config;
 	}
 
 	ret = ath6kl_core_init(ar);
 	if (ret) {
 		ath6kl_err("Failed to init ath6kl core\n");
-		goto err_core_alloc;
+		goto err_sdio_config;
 	}
 
 	ath6kl_notify_init_done();
 	return ret;
 
-err_core_alloc:
+err_sdio_config:
+	sysfs_remove_link(wlan_properties_kobj, "sleep_policy");
+err_create_link:
+	sysfs_remove_group(&ar_sdio->func->dev.kobj,
+                           &ath6kl_sleep_policy_attribute);
+err_create_group:
+	kobject_put(wlan_properties_kobj);
+err_create_properties:
+ 	
 	ath6kl_core_free(ar_sdio->ar);
 err_dma:
 	kfree(ar_sdio->dma_buffer);
@@ -1372,6 +1453,13 @@ static void ath6kl_sdio_remove(struct sdio_func *func)
 		   func->num, func->vendor, func->device);
 
 	ar_sdio = sdio_get_drvdata(func);
+
+	sysfs_remove_link(wlan_properties_kobj, "sleep_policy");
+	sysfs_remove_group(&ar_sdio->func->dev.kobj,
+			&ath6kl_sleep_policy_attribute);
+	kobject_put(wlan_properties_kobj);
+
+
 
 	ath6kl_stop_txrx(ar_sdio->ar);
 	cancel_work_sync(&ar_sdio->wr_async_work);

@@ -360,8 +360,8 @@ static int cmp_bss_core(struct cfg80211_bss *a,
 {
 	int r;
 
-	if (a->channel != b->channel)
-		return b->channel->center_freq - a->channel->center_freq;
+	//if (a->channel != b->channel)
+		//return b->channel->center_freq - a->channel->center_freq;
 
 	if (is_mesh_bss(a) && is_mesh_bss(b)) {
 		r = cmp_ies(WLAN_EID_MESH_ID,
@@ -387,14 +387,15 @@ static int cmp_bss(struct cfg80211_bss *a,
 	int r;
 
 	r = cmp_bss_core(a, b);
-	if (r)
+	//if (r)
 		return r;
-
+/*
 	return cmp_ies(WLAN_EID_SSID,
 		       a->information_elements,
 		       a->len_information_elements,
 		       b->information_elements,
 		       b->len_information_elements);
+*/
 }
 
 static int cmp_hidden_bss(struct cfg80211_bss *a,
@@ -627,6 +628,9 @@ cfg80211_bss_update(struct cfg80211_registered_device *dev,
 		found->pub.signal = res->pub.signal;
 		found->pub.capability = res->pub.capability;
 		found->ts = res->ts;
+
+		/* Update channel */
+		found->pub.channel = res->pub.channel;
 
 		/* Update IEs */
 		if (res->pub.proberesp_ies) {
